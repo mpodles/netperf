@@ -92,6 +92,7 @@ char nettest_omni_id[]="\
 #endif
 
 #include <ctype.h>
+#include <stdbool.h>
 
 #ifdef NOSTDLIBH
 #include <malloc.h>
@@ -162,6 +163,141 @@ char nettest_omni_id[]="\
 #if !defined(HAVE_GETADDRINFO) || !defined(HAVE_GETNAMEINFO)
 # include "missing/getaddrinfo.h"
 #endif
+
+bool g_xlio = true;
+bool g_xlio_zcopy = true;
+#if HAVE_MELLANOX_XLIO_EXTRA_H
+#include "mellanox/xlio_extra.h"
+#include <dlfcn.h>
+
+struct xlio_ops {
+	int (*socket)(int domain, int type, int protocol);
+	int (*bind)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+	int (*listen)(int sockfd, int backlog);
+	int (*connect)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+	int (*accept)(int sockfd, struct sockaddr *restrict addr, socklen_t *restrict addrlen);
+	int (*close)(int fd);
+	ssize_t (*readv)(int fd, const struct iovec *iov, int iovcnt);
+	ssize_t (*send)(int fd, void *buf, size_t len, int flags);
+	ssize_t (*writev)(int fd, const struct iovec *iov, int iovcnt);
+	ssize_t (*recv)(int sockfd, void *buf, size_t len, int flags);
+	ssize_t (*recvmsg)(int sockfd, struct msghdr *msg, int flags);
+	ssize_t (*sendmsg)(int sockfd, const struct msghdr *msg, int flags);
+	int (*epoll_create1)(int flags);
+	int (*epoll_ctl)(int epfd, int op, int fd, struct epoll_event *event);
+	int (*epoll_wait)(int epfd, struct epoll_event *events, int maxevents, int timeout);
+	int (*fcntl)(int fd, int cmd, ... /* arg */);
+	int (*ioctl)(int fd, unsigned long request, ...);
+	int (*getsockopt)(int sockfd, int level, int optname, void *restrict optval, socklen_t *restrict optlen);
+	int (*setsockopt)(int sockfd, int level, int optname, const void *optval, socklen_t optlen);
+	int (*getsockname)(int sockfd, struct sockaddr *restrict addr, socklen_t *restrict addrlen);
+	int (*getpeername)(int sockfd, struct sockaddr *restrict addr, socklen_t *restrict addrlen);
+	int (*getaddrinfo)(const char *restrict node,
+			   const char *restrict service,
+			   const struct addrinfo *restrict hints,
+			   struct addrinfo **restrict res);
+	void (*freeaddrinfo)(struct addrinfo *res);
+	const char *(*gai_strerror)(int errcode);
+};
+
+void *g_xlio_handle;
+struct xlio_ops g_xlio_ops;
+struct xlio_api_t* g_xlio_extra_api;
+
+int check_sockextreme()
+{
+  if (g_xlio_extra_api->magic != XLIO_MAGIC_NUMBER) {
+		printf ("Unexpected XLIO AP! magic number : expected %lu got %lu \n",
+			(uint64_t)XLIO_MAGIC_NUMBER , g_xlio_extra_api->magic);
+    return -1;
+	}
+ 
+ 
+	uint64_t required_caps = XLIO_EXTRA_API_GET_SOCKET_RINGS_FDS |
+		XLIO_EXTRA_API_SOCKETXTREME_POLL | 
+		XLIO_EXTRA_API_SOCKETXTREME_FREE_PACKETS | 
+		XLIO_EXTRA_API_IOCTL;
+	if ((g_xlio_extra_api->cap_mask & required_caps) != required_caps) {
+		printf ("Required XLIO caps are missing: required %lu, got %lu \n", 
+			required_caps, g_xlio_extra_api->cap_mask ); 
+    return -1;
+	}
+  return 0;
+}
+
+int load_xlio()
+{
+	g_xlio_handle = dlopen("/opt/mellanox/libxlio/lib/libxlio.so", RTLD_NOW);
+	if (!g_xlio_handle) {
+    printf("Failed to load handle\n");
+		return -1;
+	}
+
+  g_xlio_extra_api = xlio_get_api();
+  if(check_sockextreme()) 
+    printf("Sockextreme not working\n");
+  else
+    printf("Sockextreme loaded\n");
+
+#define GET_SYM(sym) \
+	g_xlio_ops.sym = dlsym(g_xlio_handle, #sym); \
+	if (!g_xlio_ops.sym) { \
+		printf("Failed to find symbol '%s'in XLIO library\n", #sym); \
+		dlclose(g_xlio_handle); \
+		g_xlio_handle = NULL; \
+		return -1; \
+	}
+
+	GET_SYM(socket);
+	GET_SYM(bind);
+	GET_SYM(listen);
+	GET_SYM(connect);
+	GET_SYM(accept);
+	GET_SYM(close);
+	GET_SYM(readv);
+	GET_SYM(writev);
+	GET_SYM(recv);
+	GET_SYM(recvmsg);
+	GET_SYM(sendmsg);
+	GET_SYM(send);
+	GET_SYM(epoll_create1);
+	GET_SYM(epoll_ctl);
+	GET_SYM(epoll_wait);
+	GET_SYM(fcntl);
+	GET_SYM(ioctl);
+	GET_SYM(getsockopt);
+	GET_SYM(setsockopt);
+	GET_SYM(getsockname);
+	GET_SYM(getpeername);
+	GET_SYM(getaddrinfo);
+	GET_SYM(freeaddrinfo);
+	GET_SYM(gai_strerror);
+#undef GET_SYM
+  return 0;
+}
+
+int create_xlio_socket()
+{
+  load_xlio();
+  int err;
+  socklen_t len = sizeof(g_xlio_extra_api);
+
+  err = g_xlio_ops.getsockopt(-2, SOL_SOCKET, SO_XLIO_GET_API, &g_xlio_extra_api, &len);
+  if (err < 0) {
+    printf("extra_api error\n");
+  }
+
+  int xlio_socket;
+  if ((xlio_socket = g_xlio_ops.socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+      printf("\n Socket creation error \n");
+      return -1;
+  }
+
+  printf("Created socket\n");
+  return xlio_socket;
+}
+
+#endif // XLIO_EXTRA
 
 #include "netlib.h"
 #include "netsh.h"
@@ -485,13 +621,6 @@ static int client_port_max = 65535;
 
  /* different options for the sockets				*/
 
-int
-  loc_nodelay,		/* don't/do use NODELAY	locally		*/
-  rem_nodelay,		/* don't/do use NODELAY remotely	*/
-  loc_sndavoid,		/* avoid send copies locally		*/
-  loc_rcvavoid,		/* avoid recv copies locally		*/
-  rem_sndavoid,		/* avoid send copies remotely		*/
-  rem_rcvavoid; 	/* avoid recv_copies remotely		*/
 
 extern int
   loc_tcpcork,
@@ -3042,10 +3171,16 @@ send_data(SOCKET data_socket, struct ring_elt *send_ring, uint32_t bytes_to_send
   }
   else {
     if (!use_write) {
-      len = send(data_socket,
-		 send_ring->buffer_ptr,
-		 bytes_to_send,
-		 0);
+      if(g_xlio)
+        len = g_xlio_ops.send(data_socket,
+           send_ring->buffer_ptr,
+           bytes_to_send,
+           0);
+      else
+        len = send(data_socket,
+         send_ring->buffer_ptr,
+         bytes_to_send,
+         0);
     }
     else {
 #ifndef WIN32
@@ -3305,6 +3440,8 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
   int bytes_recvd;
   int my_recvs;
   int my_flags = 0; /* will we one day want to set MSG_WAITALL? */
+  struct xlio_recvfrom_zcopy_packets_t *xlio_packets;
+  struct xlio_recvfrom_zcopy_packet_t *xlio_packet;
 
 #if defined(__linux)
   int ret;
@@ -3365,10 +3502,36 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
     }
     else {
       /* just call recv */
-      bytes_recvd = recv(data_socket,
-			 temp_message_ptr,
-			 bytes_left,
-			 my_flags);
+      if(g_xlio) {
+        if(g_xlio_zcopy) {
+
+          bytes_recvd = g_xlio_extra_api->recvfrom_zcopy(data_socket, (void *)temp_message_ptr, bytes_left, &my_flags, NULL, NULL);
+          xlio_packets = (struct xlio_recvfrom_zcopy_packets_t *)temp_message_ptr;
+          // if(debug && (my_flags & MSG_XLIO_ZCOPY))
+              // fprintf(where, "recvfrom zcopy performed with bytes_recvd: %d, packets: %ld bytes_left: %d\n", bytes_recvd, xlio_packets->n_packet_num, bytes_left);
+
+          xlio_packet =
+              (struct xlio_recvfrom_zcopy_packet_t *)(temp_message_ptr +
+                                                      sizeof(struct xlio_recvfrom_zcopy_packets_t));
+
+          int rc = g_xlio_extra_api->recvfrom_zcopy_free_packets(data_socket, xlio_packets->pkts,
+                                                     xlio_packets->n_packet_num);
+        }
+        else {
+          bytes_recvd = g_xlio_ops.recv(data_socket,
+           temp_message_ptr,
+           bytes_left,
+           my_flags);
+
+          // if(debug)
+          //   fprintf(where, "xlio recv with bytes_recvd: %d\n", bytes_recvd);
+        }
+      }
+      else
+        bytes_recvd = recv(data_socket,
+         temp_message_ptr,
+         bytes_left,
+         my_flags);
     }
     if (bytes_recvd > 0) {
       bytes_left -= bytes_recvd;
@@ -4006,7 +4169,10 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
     if (remote_mask_len)
       random_ip_address(remote_res, remote_mask_len);
 
-    data_socket = omni_create_data_socket(local_res);
+    if(g_xlio)
+      data_socket = create_xlio_socket(local_res);
+    else
+      data_socket = omni_create_data_socket(local_res);
 
     if (data_socket == INVALID_SOCKET) {
       perror("netperf: send_omni: unable to create data socket");
@@ -4070,37 +4236,43 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 
       /* do we need to allocate a recv_ring? */
       if (NULL == recv_ring) {
-	if (rsp_size > 0) {
-	  if (recv_width == 0) recv_width = 1;
-	  bytes_to_recv = rsp_size;
-	}
-	else {
-	  /* stream test */
-	  if (recv_size == 0) {
-	    if (lsr_size > 0) {
-	      recv_size = lsr_size;
-	    }
-	    else {
-	      recv_size = 4096;
-	    }
-	  }
-	  if (recv_width == 0) {
-	    recv_width = (lsr_size/recv_size) + 1;
-	    if (recv_width == 1) recv_width++;
-	  }
-	  bytes_to_recv = recv_size;
-	}
+        
+        if (debug) {
+          fprintf(where,
+            "rsp_size: %d, recv_width: %d, lsr_size:%d ...\n",
+            rsp_size, recv_width, lsr_size);
+        }
+        if (rsp_size > 0) {
+          if (recv_width == 0) recv_width = 1;
+          bytes_to_recv = rsp_size;
+        }
+        else {
+          /* stream test */
+          if (recv_size == 0) {
+            if (lsr_size > 0) {
+              recv_size = lsr_size;
+            }
+            else {
+              recv_size = 4096;
+            }
+          }
+          if (recv_width == 0) {
+            recv_width = (lsr_size/recv_size) + 1;
+            if (recv_width == 1) recv_width++;
+          }
+          bytes_to_recv = recv_size;
+        }
 
-	recv_ring = allocate_buffer_ring(recv_width,
-					 bytes_to_recv,
-					 local_recv_align,
-					 local_recv_offset);
-	if (debug) {
-	  fprintf(where,
-		  "%s: %d entry recv_ring obtained...\n",
-		  __FUNCTION__,
-		  recv_width);
-	}
+          recv_ring = allocate_buffer_ring(recv_width,
+                   bytes_to_recv,
+                   local_recv_align,
+                   local_recv_offset);
+          if (debug) {
+            fprintf(where,
+              "%s: %d entry recv_ring obtained...\n",
+              __FUNCTION__,
+              recv_width);
+          }
       }
     }
 
@@ -4344,7 +4516,11 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	if (connection_test)
 	  pick_next_port_number(local_res,remote_res);
 
-	data_socket = omni_create_data_socket(local_res);
+  if(g_xlio)
+    data_socket = create_xlio_socket(local_res);
+  else
+    data_socket = omni_create_data_socket(local_res);
+
 
 	if (data_socket == INVALID_SOCKET) {
 	  perror("netperf: send_omni: unable to create data socket");
@@ -4363,7 +4539,11 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
       if (need_to_connect && !use_fastopen) {
 	/* assign to data_socket since connect_data_socket returns
 	   SOCKET and not int thanks to Windows. */
-	ret = connect_data_socket(data_socket,remote_res,dont_give_up);
+  if(g_xlio)
+    ret = g_xlio_ops.connect(data_socket, remote_res->ai_addr, remote_res->ai_addrlen);
+  else
+    ret = connect_data_socket(data_socket,remote_res,dont_give_up);
+
 	if (ret == 0) {
 	  connected = 1;
 	  need_to_connect = 0;
@@ -4424,7 +4604,7 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	     (requests_outstanding < first_burst_size) &&
 	     (NETPERF_IS_RR(direction)) &&
 	     (!connection_test)) {
-	if (debug > 1) {
+	if (debug ) {
 	  fprintf(where,
 		  "injecting, req_outstanding %d burst %d\n",
 		  requests_outstanding,
@@ -4478,6 +4658,8 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 			/* if the destination above is NULL, this is ignored */
 			remote_res->ai_addrlen,
 			protocol);
+    if(debug)
+      fprintf(where,"Send_data ret: %d, bytes_to_send: %d\n", ret, bytes_to_send);
 	/* the order of these if's will seem a triffle strange, but they
 	   are my best guess as to order of probabilty and/or importance
 	   to the overhead raj 2008-01-09*/
@@ -4551,6 +4733,8 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 			/* if XMIT also set this is RR so waitall */
 			(direction & NETPERF_XMIT) ? NETPERF_WAITALL: 0,
 			&temp_recvs);
+      if(debug)
+        fprintf(where,"recv_data ring: %p, bytes_to_recvv: %d rret %d\n", recv_ring, bytes_to_recv, rret);
 	if (rret > 0) {
 	  /* if this is a recv-only test controlled by byte count we
 	     decrement the units_remaining by the bytes received */

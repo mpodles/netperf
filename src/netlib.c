@@ -1561,6 +1561,9 @@ allocate_buffer_ring(int width, int buffer_size, int alignment, int offset)
   int  fill_cursor = 0;
 
   malloc_size = buffer_size + alignment + offset;
+  fprintf(where,
+    "malloc_size: %d composed of buffer_size:%d, alignment: %d, and offset: %d\n",
+    malloc_size, buffer_size, alignment, offset);
 
   /* did the user wish to have the buffers pre-filled with data from a */
   /* particular source? */
@@ -1601,7 +1604,10 @@ allocate_buffer_ring(int width, int buffer_size, int alignment, int offset)
 	      "malloc(%d) failed!\n",
 	      malloc_size);
       exit(-1);
-    }
+    } else if(debug)
+      fprintf(where,
+	      "malloced %d!\n",
+	      malloc_size);
 
 #ifndef WIN32
     temp_link->buffer_ptr = (char *)(( (long)(temp_link->buffer_base) +
@@ -1622,11 +1628,11 @@ allocate_buffer_ring(int width, int buffer_size, int alignment, int offset)
 				      1,
 				      bytes_left,
 				      fill_source)) == 0) &&
-            (feof(fill_source))){
+            (feof(fill_source))) {
           rewind(fill_source);
         }
-	bufptr += bytes_read;
-        bytes_left -= bytes_read;
+          bufptr += bytes_read;
+          bytes_left -= bytes_read;
       }
     }
     else {
@@ -1635,15 +1641,14 @@ allocate_buffer_ring(int width, int buffer_size, int alignment, int offset)
       int j;
       char *bufptr = temp_link->buffer_ptr;
       for (j = 0; j < buffer_size; j++) {
-	bufptr[j] = default_fill[fill_cursor];
-	fill_cursor += 1;
-	/* the Windows DDK compiler with an x86_64 target wants a cast
-	   here */
-	if (fill_cursor >  (int)strlen(default_fill)) {
-	  fill_cursor = 0;
-	}
+        bufptr[j] = default_fill[fill_cursor];
+        fill_cursor += 1;
+        /* the Windows DDK compiler with an x86_64 target wants a cast
+           here */
+        if (fill_cursor >  (int)strlen(default_fill)) {
+          fill_cursor = 0;
+        }
       }
-
     }
     temp_link->next = prev_link;
     prev_link = temp_link;
