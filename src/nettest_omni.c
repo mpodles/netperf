@@ -3510,12 +3510,20 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
           // if(debug && (my_flags & MSG_XLIO_ZCOPY))
               // fprintf(where, "recvfrom zcopy performed with bytes_recvd: %d, packets: %ld bytes_left: %d\n", bytes_recvd, xlio_packets->n_packet_num, bytes_left);
 
+          if (debug) 
+            fprintf(where,
+            "recvfrom_zcopy returned bytes_recv:%d\n",
+            bytes_recvd);
           xlio_packet =
               (struct xlio_recvfrom_zcopy_packet_t *)(temp_message_ptr +
                                                       sizeof(struct xlio_recvfrom_zcopy_packets_t));
 
           int rc = g_xlio_extra_api->recvfrom_zcopy_free_packets(data_socket, xlio_packets->pkts,
                                                      xlio_packets->n_packet_num);
+          if (debug) 
+            fprintf(where,
+            "freed %ld zcopy xlio packets\n",
+            xlio_packets->n_packet_num);
         }
         else {
           bytes_recvd = g_xlio_ops.recv(data_socket,
@@ -4203,6 +4211,11 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  /* request/response test */
 	  if (send_width == 0) send_width = 1;
 	  bytes_to_send = req_size;
+    if (debug) 
+      fprintf(where,
+        "req_size > 0, allocating RR test send_width:%d, bytes_to_send=%d...\n",
+        send_width, bytes_to_send);
+    
 	}
 	else {
 	  /* stream test */
@@ -4629,6 +4642,8 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  failed_sends++;
 	}
 	else {
+    if(debug)
+      fprintf(where,"Initial burst send_data ret: %d, bytes_to_send: %d\n", ret, bytes_to_send);
 	  local_send_calls += 1;
 	  requests_outstanding += 1;
 	}
@@ -4651,6 +4666,8 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	 try to send something. */
       if (direction & NETPERF_XMIT) {
 
+  if(debug)
+    fprintf(where, "PLANNING TO send_data: bytes_to_send: %d\n", bytes_to_send);
 	ret = send_data(data_socket,
 			send_ring,
 			bytes_to_send,
@@ -4724,6 +4741,8 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 #endif /* WIN32 */
 
       if (direction & NETPERF_RECV) {
+        if(debug)
+          fprintf(where,"recv_data ring: %p, bytes_to_recvv: %d \n", recv_ring, bytes_to_recv);
 	rret = recv_data(data_socket,
 			recv_ring,
 			bytes_to_recv,
@@ -7701,8 +7720,17 @@ scan_omni_args(int argc, char *argv[])
       break_args(optarg,arg1,arg2);
       if (arg1[0])
 	req_size = convert(arg1);
+	if (debug) 
+	  fprintf(where,
+    "req_size set to %d because of arg1: %s\n",
+    req_size, arg1);
+
       if (arg2[0])
 	rsp_size = convert(arg2);
+	if (debug) 
+	  fprintf(where,
+    "resp_size set to %d because of arg2: %s\n",
+    req_size, arg2);
       break;
     case 'R':
       routing_allowed = atoi(optarg);
