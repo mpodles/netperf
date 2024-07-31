@@ -288,6 +288,7 @@ int create_xlio_socket()
   }
 
   int xlio_socket;
+  printf("Creating XLIO socket\n");
   if ((xlio_socket = g_xlio_ops.socket(AF_INET, SOCK_STREAM, 0)) < 0) {
       printf("\n Socket creation error \n");
       return -1;
@@ -296,6 +297,8 @@ int create_xlio_socket()
   printf("Created socket\n");
   return xlio_socket;
 }
+
+#define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 
 #endif // XLIO_EXTRA
 
@@ -3505,6 +3508,10 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
       if(g_xlio) {
         if(g_xlio_zcopy) {
 
+          if (debug) 
+            fprintf(where,
+            "going to recvfrom_zcopy\n");
+
           bytes_recvd = g_xlio_extra_api->recvfrom_zcopy(data_socket, (void *)temp_message_ptr, bytes_left, &my_flags, NULL, NULL);
           xlio_packets = (struct xlio_recvfrom_zcopy_packets_t *)temp_message_ptr;
           // if(debug && (my_flags & MSG_XLIO_ZCOPY))
@@ -3544,6 +3551,10 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
     if (bytes_recvd > 0) {
       bytes_left -= bytes_recvd;
       temp_message_ptr += bytes_recvd;
+      if (debug) 
+        fprintf(where,
+        "bytes left to recv:%d\n",
+        bytes_left);
     }
     else {
       break;
@@ -3576,10 +3587,13 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
      error or end of test cases.  if NETPERF_WAITALL isn't set, this
      is a STREAM test, and we will have only made one call to recv, so
      bytes_recvd will be accurate. */
-  if (bytes_left)
+  if (bytes_left > 0)
     return bytes_recvd;
-  else
+  else if (bytes_left == 0)
     return bytes_to_recv;
+  // We've received more data that just the response, this happens if initial burst has been used
+  else if (bytes_left < 0)
+    return bytes_to_recv - bytes_left;
 
 }
 
@@ -4082,6 +4096,7 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 
 #ifdef WANT_FIRST_BURST
   int requests_outstanding = 0;
+  int bytes_outstanding = 0;
 #endif
 
   omni_request =
@@ -4167,6 +4182,7 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
        outstanding and the "congestion window for each new
        iteration. raj 2006-01-31. */
     requests_outstanding = 0;
+    bytes_outstanding = 0;
 #endif
 
     /* if the command-line included requests to randomize the IP
@@ -4646,6 +4662,7 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
       fprintf(where,"Initial burst send_data ret: %d, bytes_to_send: %d\n", ret, bytes_to_send);
 	  local_send_calls += 1;
 	  requests_outstanding += 1;
+    bytes_outstanding += bytes_to_recv;
 	}
 
 	/* yes, it seems a trifle odd having this *after* the send()
@@ -4675,8 +4692,6 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 			/* if the destination above is NULL, this is ignored */
 			remote_res->ai_addrlen,
 			protocol);
-    if(debug)
-      fprintf(where,"Send_data ret: %d, bytes_to_send: %d\n", ret, bytes_to_send);
 	/* the order of these if's will seem a triffle strange, but they
 	   are my best guess as to order of probabilty and/or importance
 	   to the overhead raj 2008-01-09*/
@@ -4689,6 +4704,7 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  bytes_sent += ret;
 	  send_ring = send_ring->next;
 	  local_send_calls++;
+    bytes_outstanding += bytes_to_recv;
 	}
 	else if (ret == -2) {
 	  /* what to do here -2 means a non-fatal error - probably
@@ -4719,6 +4735,8 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  perror("netperf: send_omni: send_data failed");
 	  exit(1);
 	}
+  if(debug)
+    fprintf(where,"Send_data ret: %d, bytes_to_send: %d, bytes_outstanding:%d\n", ret, bytes_to_send, bytes_outstanding);
 
       }
 
@@ -4745,15 +4763,13 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
           fprintf(where,"recv_data ring: %p, bytes_to_recvv: %d \n", recv_ring, bytes_to_recv);
 	rret = recv_data(data_socket,
 			recv_ring,
-			bytes_to_recv,
+			MIN(bytes_to_recv, bytes_outstanding),
 			(connected) ? NULL : (struct sockaddr *)&remote_addr,
 			/* if remote_addr NULL this is ignored */
 			&remote_addr_len,
 			/* if XMIT also set this is RR so waitall */
 			(direction & NETPERF_XMIT) ? NETPERF_WAITALL: 0,
 			&temp_recvs);
-      if(debug)
-        fprintf(where,"recv_data ring: %p, bytes_to_recvv: %d rret %d\n", recv_ring, bytes_to_recv, rret);
 	if (rret > 0) {
 	  /* if this is a recv-only test controlled by byte count we
 	     decrement the units_remaining by the bytes received */
@@ -4761,6 +4777,7 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	    units_remaining -= rret;
 	  }
 	  bytes_received += rret;
+	  bytes_outstanding -= rret;
 	  local_receive_calls += temp_recvs;
 	}
 	else if (rret == 0) {
@@ -4814,6 +4831,8 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  perror("netperf: send_omni: recv_data failed");
 	  exit(1);
 	}
+  if(debug)
+    fprintf(where,"finished recv_data ring: %p, bytes_to_recvv: %d with last rret %d, bytes_outstanding:%d\n", recv_ring, bytes_to_recv, rret, bytes_outstanding);
 	recv_ring = recv_ring->next;
 
 #ifdef WANT_FIRST_BURST
