@@ -3443,8 +3443,8 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
   int bytes_recvd;
   int my_recvs;
   int my_flags = 0; /* will we one day want to set MSG_WAITALL? */
+  int calls = 0;
   struct xlio_recvfrom_zcopy_packets_t *xlio_packets;
-  struct xlio_recvfrom_zcopy_packet_t *xlio_packet;
 
 #if defined(__linux)
   int ret;
@@ -3521,16 +3521,14 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
             fprintf(where,
             "recvfrom_zcopy returned bytes_recv:%d\n",
             bytes_recvd);
-          xlio_packet =
-              (struct xlio_recvfrom_zcopy_packet_t *)(temp_message_ptr +
-                                                      sizeof(struct xlio_recvfrom_zcopy_packets_t));
 
-          int rc = g_xlio_extra_api->recvfrom_zcopy_free_packets(data_socket, xlio_packets->pkts,
-                                                     xlio_packets->n_packet_num);
-          if (debug) 
-            fprintf(where,
-            "freed %ld zcopy xlio packets\n",
-            xlio_packets->n_packet_num);
+          // struct xlio_recvfrom_zcopy_packets_t *xlio_packets = (struct xlio_recvfrom_zcopy_packets_t *)recv_ring->buffer_ptr;
+          // int rc = g_xlio_extra_api->recvfrom_zcopy_free_packets(data_socket, xlio_packets->pkts,
+          //                                            xlio_packets->n_packet_num);
+          // if (debug) 
+          //   fprintf(where,
+          //   "freed %ld zcopy xlio packets\n",
+          //   xlio_packets->n_packet_num);
         }
         else {
           bytes_recvd = g_xlio_ops.recv(data_socket,
@@ -3538,8 +3536,8 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
            bytes_left,
            my_flags);
 
-          // if(debug)
-          //   fprintf(where, "xlio recv with bytes_recvd: %d\n", bytes_recvd);
+          if(debug)
+            fprintf(where, "xlio recv with bytes_recvd: %d\n", bytes_recvd);
         }
       }
       else
@@ -3550,7 +3548,16 @@ recv_data(SOCKET data_socket, struct ring_elt *recv_ring, uint32_t bytes_to_recv
     }
     if (bytes_recvd > 0) {
       bytes_left -= bytes_recvd;
-      temp_message_ptr += bytes_recvd;
+      if (g_xlio && g_xlio_zcopy) {
+        temp_message_ptr += sizeof(struct xlio_recvfrom_zcopy_packets_t);
+        for( int i = 0; i < xlio_packets->n_packet_num ; ++i) {
+          struct xlio_recvfrom_zcopy_packet_t *pkt = (struct xlio_recvfrom_zcopy_packet_t *)temp_message_ptr;
+          temp_message_ptr += sizeof(struct xlio_recvfrom_zcopy_packet_t) + pkt->sz_iov * sizeof(struct iovec);
+        }
+      }
+
+      else
+        temp_message_ptr += bytes_recvd;
       if (debug) 
         fprintf(where,
         "bytes left to recv:%d\n",
@@ -4776,9 +4783,37 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  if (!(direction & NETPERF_XMIT) && (units_remaining > 0)) {
 	    units_remaining -= rret;
 	  }
+    if(debug)
+      fprintf(where,"in total received: %d bytes over %d recvfrom calls \n", rret, temp_recvs);
 	  bytes_received += rret;
 	  bytes_outstanding -= rret;
 	  local_receive_calls += temp_recvs;
+    if(g_xlio && g_xlio_zcopy) {
+      // usleep(10);
+
+      char *current_ptr = recv_ring->buffer_ptr;
+      for(int recv = 0; recv < temp_recvs; ++recv) {
+        struct xlio_recvfrom_zcopy_packets_t *xlio_packets = (struct xlio_recvfrom_zcopy_packets_t *)current_ptr;
+        current_ptr += sizeof(struct xlio_recvfrom_zcopy_packets_t);
+        int pkts = xlio_packets->n_packet_num;
+        int iovec = 0;
+        size_t data_size = 0;
+        for(int pkt = 0; pkt < pkts; ++pkt) {
+            struct xlio_recvfrom_zcopy_packet_t *pkt = (struct xlio_recvfrom_zcopy_packet_t *)current_ptr;
+            iovec += pkt->sz_iov;
+            for(int io = 0; io < pkt->sz_iov; ++io)
+              data_size += pkt->iov[io].iov_len;
+            current_ptr += sizeof(struct xlio_recvfrom_zcopy_packet_t) + pkt->sz_iov * sizeof(struct iovec);
+        }
+        int rc = g_xlio_extra_api->recvfrom_zcopy_free_packets(data_socket, xlio_packets->pkts,
+                                                   xlio_packets->n_packet_num);
+        if (debug) 
+          fprintf(where,
+          "current pkts %d, freed %d iovecs with %d data inside\n",
+          pkts, iovec, data_size);
+      }
+
+    }
 	}
 	else if (rret == 0) {
 	  /* is this the end of a test, just a zero-byte recv, or
