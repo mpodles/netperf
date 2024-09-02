@@ -164,6 +164,7 @@ char nettest_omni_id[]="\
 # include "missing/getaddrinfo.h"
 #endif
 
+#include <dpu_statistics.h>
 bool g_xlio = true;
 bool g_xlio_zcopy = true;
 #if HAVE_MELLANOX_XLIO_EXTRA_H
@@ -4690,7 +4691,9 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	 try to send something. */
       if (direction & NETPERF_XMIT) {
 
-  if(debug)
+// MPPEASURE_STATS_EVERY_N_START(RECEIVED_DATA_LOGGER, 50);
+measure_start(NETPERF_LOOP);
+if(debug)
     fprintf(where, "PLANNING TO send_data: bytes_to_send: %d\n", bytes_to_send);
 	ret = send_data(data_socket,
 			send_ring,
@@ -4788,29 +4791,46 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  bytes_received += rret;
 	  bytes_outstanding -= rret;
 	  local_receive_calls += temp_recvs;
+    // To get a better understanding of the access cost to the payload, the algorithm will try to fetch
+    // data from offsets which would regularly hold the headers and do some dummy computation on them
+    size_t last_hdr_offset = 0;
+    const int nvme_header_size = 24;
+    const int nvme_response_size = 4096;
+    size_t dummy_computation = 0;
     if(g_xlio && g_xlio_zcopy) {
       // usleep(10);
 
       char *current_ptr = recv_ring->buffer_ptr;
+      size_t data_already_received = 0;
       for(int recv = 0; recv < temp_recvs; ++recv) {
         struct xlio_recvfrom_zcopy_packets_t *xlio_packets = (struct xlio_recvfrom_zcopy_packets_t *)current_ptr;
         current_ptr += sizeof(struct xlio_recvfrom_zcopy_packets_t);
         int pkts = xlio_packets->n_packet_num;
         int iovec = 0;
-        size_t data_size = 0;
+        size_t headers = 0;
+        size_t packets_data_size = 0;
         for(int pkt = 0; pkt < pkts; ++pkt) {
             struct xlio_recvfrom_zcopy_packet_t *pkt = (struct xlio_recvfrom_zcopy_packet_t *)current_ptr;
             iovec += pkt->sz_iov;
-            for(int io = 0; io < pkt->sz_iov; ++io)
-              data_size += pkt->iov[io].iov_len;
+            for(int io = 0; io < pkt->sz_iov; ++io) {
+              packets_data_size += pkt->iov[io].iov_len;
+
+              // while((last_hdr_offset + nvme_header_size - data_already_received) < pkt->iov[io].iov_len) {
+              //     for(int byte=0; byte < nvme_header_size; ++byte)
+              //       dummy_computation += ((char *)pkt->iov[io].iov_base)[byte];
+              //     last_hdr_offset += nvme_header_size + nvme_response_size;
+              //     headers +=1;
+              //   }
+              data_already_received += pkt->iov[io].iov_len;
+            }
             current_ptr += sizeof(struct xlio_recvfrom_zcopy_packet_t) + pkt->sz_iov * sizeof(struct iovec);
         }
         int rc = g_xlio_extra_api->recvfrom_zcopy_free_packets(data_socket, xlio_packets->pkts,
                                                    xlio_packets->n_packet_num);
         if (debug) 
           fprintf(where,
-          "current pkts %d, freed %d iovecs with %d data inside\n",
-          pkts, iovec, data_size);
+          "current pkts %d, freed %d iovecs with %ld data inside, headers: %ld\n",
+          pkts, iovec, packets_data_size, headers);
       }
 
     }
@@ -4866,6 +4886,7 @@ send_omni_inner(char remote_host[], unsigned int legacy_caller, char header_str[
 	  perror("netperf: send_omni: recv_data failed");
 	  exit(1);
 	}
+  measure_finish(NETPERF_LOOP);
   if(debug)
     fprintf(where,"finished recv_data ring: %p, bytes_to_recvv: %d with last rret %d, bytes_outstanding:%d\n", recv_ring, bytes_to_recv, rret, bytes_outstanding);
 	recv_ring = recv_ring->next;
